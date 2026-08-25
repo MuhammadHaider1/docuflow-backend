@@ -12,13 +12,8 @@ from src.tasks import celery_app
 
 
 def run_async(coro):
-    """Helper to safely execute async DB updates inside synchronous Celery task"""
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Safely execute async DB updates inside a synchronous Celery worker thread."""
+    return asyncio.run(coro)
 
 
 async def _update_document_status(
@@ -60,26 +55,30 @@ def process_document_task(
         if storage_key.lower().endswith(".pdf"):
             print(f"Extracting text from PDF: {storage_key}...")
 
-            # fetch object strem from MINIO
-            response = minio_client.get_object(
-                bucket_name=settings.MINIO_BUCKET_NAME, object_name=storage_key
-            )
-            pdf_bytes = io.BytesIO(response.read())
-            response.close()
-            response.release_conn()
+            response = None
+            try:
+                # Fetch object stream from MINIO
+                response = minio_client.get_object(
+                    bucket_name=settings.MINIO_BUCKET_NAME, object_name=storage_key
+                )
+                pdf_bytes = io.BytesIO(response.read())
 
-            # Read PDF content using pypdf
-            reader = PdfReader(pdf_bytes)
-            pages_text = []
-            for i, page in enumerate(reader.pages):
-                text = page.extract_text()
-                if text:
-                    pages_text.append(text)
+                # Read PDF content using pypdf
+                reader = PdfReader(pdf_bytes)
+                pages_text = []
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        pages_text.append(text)
 
-            extracted_text = "\n".join(pages_text)
-            print(
-                f"Extracted {len(extracted_text)} characters from {len(reader.pages)} pages."
-            )
+                extracted_text = "\n".join(pages_text)
+                print(
+                    f"Extracted {len(extracted_text)} characters from {len(reader.pages)} pages."
+                )
+            finally:
+                if response:
+                    response.close()
+                    response.release_conn()
 
         run_async(_update_document_status(document_id, "completed", extracted_text))
 
@@ -90,11 +89,11 @@ def process_document_task(
         }
 
     except Exception as exc:
-        print(f"Processing document {document_id}: {str(exc)}")
+        print(f"Processing document error for {document_id}: {str(exc)}")
 
         if self.request.retries >= self.max_retries - 1:
             print(f"Max retries reached for document {document_id}")
             run_async(_update_document_status(document_id, "failed"))
             raise exc
 
-        self.retry(exc=exc, countdown=5)
+        raise self.retry(exc=exc, countdown=5)

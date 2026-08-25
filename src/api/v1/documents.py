@@ -1,10 +1,21 @@
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, Header, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import PermissionChecker
 from src.core.database import get_db
+from src.core.limiter import limiter  # SlowAPI limiter instance
 from src.core.security import is_authenticated
 from src.models.auth import User
 from src.schemas.document import (
@@ -14,10 +25,11 @@ from src.schemas.document import (
     DocumentVersionResponse,
     FolderCreate,
     FolderResponse,
-    FolderUpdate,  # Update schema Ensure kijiye schemas mein ho
+    FolderUpdate,
 )
 from src.schemas.generic import PaginatedResponse
 from src.services.document import DocumentService
+from src.tasks.document_tasks import process_document_task
 
 router = APIRouter()
 
@@ -29,7 +41,9 @@ router = APIRouter()
 @router.post(
     "/folders", response_model=FolderResponse, status_code=status.HTTP_201_CREATED
 )
+@limiter.limit("60/minute")
 async def create_new_folder(
+    request: Request,
     payload: FolderCreate,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -41,7 +55,9 @@ async def create_new_folder(
 
 
 @router.get("/folders/tree", response_model=list[FolderResponse])
+@limiter.limit("120/minute")
 async def get_organization_folder_tree(
+    request: Request,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),
@@ -52,7 +68,9 @@ async def get_organization_folder_tree(
 
 
 @router.patch("/folders/{folder_id}", response_model=FolderResponse)
+@limiter.limit("60/minute")
 async def update_folder(
+    request: Request,
     folder_id: uuid.UUID,
     payload: FolderUpdate,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
@@ -68,7 +86,9 @@ async def update_folder(
 
 
 @router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("30/minute")
 async def delete_folder(
+    request: Request,
     folder_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -89,7 +109,9 @@ async def delete_folder(
 @router.post(
     "/documents", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED
 )
+@limiter.limit("30/minute")
 async def create_new_document(
+    request: Request,
     title: str = Form(...),
     description: str = Form(None),
     folder_id: uuid.UUID = Form(None),
@@ -99,16 +121,29 @@ async def create_new_document(
     current_user: User = Depends(is_authenticated),
     _: bool = Depends(PermissionChecker("document:create")),
 ):
-    """Creates a new document and uploads initial file version."""
+    """Creates a new document, uploads initial file version, and triggers Celery extraction."""
     payload = DocumentCreate(title=title, description=description, folder_id=folder_id)
     service = DocumentService(db)
-    return await service.create_new_document(
+    document = await service.create_new_document(
         payload=payload, user_id=current_user.id, org_id=x_organization_id, file=file
     )
 
+    # 🚀 Trigger Celery Background Processing Pipeline
+    latest_ver = getattr(document, "latest_version", None)
+    if latest_ver and hasattr(latest_ver, "storage_key"):
+        process_document_task.delay(
+            document_id=str(document.id),
+            organization_id=str(x_organization_id),
+            storage_key=latest_ver.storage_key,
+        )
+
+    return document
+
 
 @router.get("/documents/search", response_model=PaginatedResponse[DocumentResponse])
+@limiter.limit("100/minute")
 async def search_document(
+    request: Request,
     q: str | None = Query(None, description="Search query string"),
     folder_id: uuid.UUID | None = Query(None, description="Filter by Folder ID"),
     page: int = Query(1, ge=1, description="Page number"),
@@ -120,7 +155,7 @@ async def search_document(
     current_user: User = Depends(is_authenticated),
     _: bool = Depends(PermissionChecker("document:read")),
 ):
-    """Search and list documents inside organization."""
+    """Search and list documents inside organization with pagination."""
     service = DocumentService(db)
     return await service.search_documents(
         org_id=x_organization_id,
@@ -134,7 +169,9 @@ async def search_document(
 
 
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
+@limiter.limit("120/minute")
 async def get_document_details(
+    request: Request,
     document_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -155,7 +192,9 @@ async def get_document_details(
     response_model=DocumentVersionResponse,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("30/minute")
 async def upload_document_version(
+    request: Request,
     document_id: uuid.UUID,
     file: UploadFile = File(...),
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
@@ -164,18 +203,29 @@ async def upload_document_version(
     _: bool = Depends(PermissionChecker("document:update")),
 ):
     service = DocumentService(db)
-    return await service.upload_document_version(
+    version = await service.upload_document_version(
         doc_id=document_id,
         org_id=x_organization_id,
         user_id=current_user.id,
         file=file,
     )
 
+    # 🚀 Trigger Background Processing for New Version
+    process_document_task.delay(
+        document_id=str(document_id),
+        organization_id=str(x_organization_id),
+        storage_key=version.storage_key,
+    )
+
+    return version
+
 
 @router.get(
     "/documents/{document_id}/versions", response_model=list[DocumentVersionResponse]
 )
+@limiter.limit("120/minute")
 async def list_document_versions(
+    request: Request,
     document_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -193,7 +243,9 @@ async def list_document_versions(
     "/documents/{document_id}/versions/{version_id}/download",
     response_model=DocumentDownloadResponse,
 )
+@limiter.limit("60/minute")
 async def get_document_version_download_url(
+    request: Request,
     document_id: uuid.UUID,
     version_id: uuid.UUID,
     expires_in: int = Query(900, ge=60, le=86400),
@@ -215,7 +267,9 @@ async def get_document_version_download_url(
 
 
 @router.delete("/documents/{document_id}", response_model=DocumentResponse)
+@limiter.limit("30/minute")
 async def archive_existing_document(
+    request: Request,
     document_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -227,7 +281,9 @@ async def archive_existing_document(
 
 
 @router.post("/documents/{document_id}/restore", response_model=DocumentResponse)
+@limiter.limit("30/minute")
 async def restore_archived_document(
+    request: Request,
     document_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
