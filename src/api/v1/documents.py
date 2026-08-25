@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import PermissionChecker
 from src.core.database import get_db
-from src.core.limiter import limiter  # SlowAPI limiter instance
+from src.core.limiter import limiter
 from src.core.security import is_authenticated
 from src.models.auth import User
 from src.schemas.document import (
@@ -28,10 +28,17 @@ from src.schemas.document import (
     FolderUpdate,
 )
 from src.schemas.generic import PaginatedResponse
+from src.services.audit import AuditService
 from src.services.document import DocumentService
 from src.tasks.document_tasks import process_document_task
 
 router = APIRouter()
+
+
+# Helper function to get IP address safely
+def get_client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
 
 # ==========================================
 # 📂 FOLDER ENDPOINTS
@@ -51,7 +58,24 @@ async def create_new_folder(
     _: bool = Depends(PermissionChecker("folder:create")),
 ):
     service = DocumentService(db)
-    return await service.create_new_folder(payload, org_id=x_organization_id)
+    folder = await service.create_new_folder(payload, org_id=x_organization_id)
+
+    # 🔍 Audit Log Trigger
+    audit_service = AuditService(db)
+    await audit_service.log_activity(
+        organization_id=x_organization_id,
+        user_id=current_user.id,
+        action="CREATE_FOLDER",
+        entity_type="FOLDER",
+        entity_id=folder.id,
+        details={
+            "name": folder.name,
+            "parent_id": str(folder.parent_id) if folder.parent_id else None,
+        },
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+    return folder
 
 
 @router.get("/folders/tree", response_model=list[FolderResponse])
@@ -80,9 +104,23 @@ async def update_folder(
 ):
     """Rename or move folder."""
     service = DocumentService(db)
-    return await service.update_folder(
+    folder = await service.update_folder(
         folder_id=folder_id, payload=payload, org_id=x_organization_id
     )
+
+    # 🔍 Audit Log Trigger
+    audit_service = AuditService(db)
+    await audit_service.log_activity(
+        organization_id=x_organization_id,
+        user_id=current_user.id,
+        action="UPDATE_FOLDER",
+        entity_type="FOLDER",
+        entity_id=folder.id,
+        details={"updated_fields": payload.model_dump(exclude_unset=True)},
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+    return folder
 
 
 @router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -98,6 +136,18 @@ async def delete_folder(
     """Delete empty folder."""
     service = DocumentService(db)
     await service.delete_folder(folder_id=folder_id, org_id=x_organization_id)
+
+    # 🔍 Audit Log Trigger
+    audit_service = AuditService(db)
+    await audit_service.log_activity(
+        organization_id=x_organization_id,
+        user_id=current_user.id,
+        action="DELETE_FOLDER",
+        entity_type="FOLDER",
+        entity_id=folder_id,
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
     return None
 
 
@@ -121,14 +171,24 @@ async def create_new_document(
     current_user: User = Depends(is_authenticated),
     _: bool = Depends(PermissionChecker("document:create")),
 ):
-    """Creates a new document, uploads initial file version, and triggers Celery extraction."""
     payload = DocumentCreate(title=title, description=description, folder_id=folder_id)
     service = DocumentService(db)
     document = await service.create_new_document(
         payload=payload, user_id=current_user.id, org_id=x_organization_id, file=file
     )
 
-    # 🚀 Trigger Celery Background Processing Pipeline
+    # 🔍 Audit Log Trigger
+    audit_service = AuditService(db)
+    await audit_service.log_activity(
+        organization_id=x_organization_id,
+        user_id=current_user.id,
+        action="CREATE_DOCUMENT",
+        entity_type="DOCUMENT",
+        entity_id=document.id,
+        details={"title": title, "filename": file.filename},
+        ip_address=get_client_ip(request),
+    )
+
     latest_ver = getattr(document, "latest_version", None)
     if latest_ver and hasattr(latest_ver, "storage_key"):
         process_document_task.delay(
@@ -137,6 +197,7 @@ async def create_new_document(
             storage_key=latest_ver.storage_key,
         )
 
+    await db.commit()
     return document
 
 
@@ -155,7 +216,6 @@ async def search_document(
     current_user: User = Depends(is_authenticated),
     _: bool = Depends(PermissionChecker("document:read")),
 ):
-    """Search and list documents inside organization with pagination."""
     service = DocumentService(db)
     return await service.search_documents(
         org_id=x_organization_id,
@@ -210,13 +270,25 @@ async def upload_document_version(
         file=file,
     )
 
-    # 🚀 Trigger Background Processing for New Version
+    # 🔍 Audit Log Trigger
+    audit_service = AuditService(db)
+    await audit_service.log_activity(
+        organization_id=x_organization_id,
+        user_id=current_user.id,
+        action="UPLOAD_VERSION",
+        entity_type="DOCUMENT_VERSION",
+        entity_id=version.id,
+        details={"document_id": str(document_id), "version": version.version_number},
+        ip_address=get_client_ip(request),
+    )
+
     process_document_task.delay(
         document_id=str(document_id),
         organization_id=str(x_organization_id),
         storage_key=version.storage_key,
     )
 
+    await db.commit()
     return version
 
 
@@ -232,7 +304,6 @@ async def list_document_versions(
     current_user: User = Depends(is_authenticated),
     _: bool = Depends(PermissionChecker("document:read")),
 ):
-    """Fetch all revision history / versions of a document."""
     service = DocumentService(db)
     return await service.get_document_versions(
         doc_id=document_id, org_id=x_organization_id
@@ -277,7 +348,22 @@ async def archive_existing_document(
     _: bool = Depends(PermissionChecker("document:delete")),
 ):
     service = DocumentService(db)
-    return await service.archive_document(doc_id=document_id, org_id=x_organization_id)
+    document = await service.archive_document(
+        doc_id=document_id, org_id=x_organization_id
+    )
+
+    # 🔍 Audit Log Trigger
+    audit_service = AuditService(db)
+    await audit_service.log_activity(
+        organization_id=x_organization_id,
+        user_id=current_user.id,
+        action="ARCHIVE_DOCUMENT",
+        entity_type="DOCUMENT",
+        entity_id=document_id,
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+    return document
 
 
 @router.post("/documents/{document_id}/restore", response_model=DocumentResponse)
@@ -290,6 +376,20 @@ async def restore_archived_document(
     current_user: User = Depends(is_authenticated),
     _: bool = Depends(PermissionChecker("document:update")),
 ):
-    """Restore an archived / soft-deleted document."""
     service = DocumentService(db)
-    return await service.restore_document(doc_id=document_id, org_id=x_organization_id)
+    document = await service.restore_document(
+        doc_id=document_id, org_id=x_organization_id
+    )
+
+    # 🔍 Audit Log Trigger
+    audit_service = AuditService(db)
+    await audit_service.log_activity(
+        organization_id=x_organization_id,
+        user_id=current_user.id,
+        action="RESTORE_DOCUMENT",
+        entity_type="DOCUMENT",
+        entity_id=document_id,
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+    return document

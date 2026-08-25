@@ -13,7 +13,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # 1. Create audit_logs table
     op.create_table(
-        "audit_log",
+        "auditlog",
         sa.Column(
             "id",
             postgresql.UUID(as_uuid=True),
@@ -86,4 +86,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("notification")
-    op.drop_table("audit_log")
+    op.drop_table("auditlog")
