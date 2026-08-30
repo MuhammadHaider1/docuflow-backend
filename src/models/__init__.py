@@ -2,6 +2,7 @@
 from src.core.database import Base
 from src.models.audit import AuditLog
 from src.models.auth import RefreshToken, User
+from src.models.comment import Comment
 from src.models.document import Document, DocumentVersion, Folder
 from src.models.notification import Notification
 from src.models.organization import Membership, Organization
@@ -21,4 +22,5 @@ __all__ = [
     "RolePermission",
     "AuditLog",
     "Notification",
+    "Comment",
 ]
