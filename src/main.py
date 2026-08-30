@@ -55,3 +55,8 @@ app.include_router(rbac_router, prefix="/api/v1", tags=["RBAC"])
 app.include_router(comment.router, prefix="/api/v1", tags=["Comments"])
 app.include_router(audit_router, prefix="/api/v1", tags=["Audit Logs"])
 app.include_router(notification_router, prefix="/api/v1", tags=["Notifications"])
+
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    return {"status": "ok", "service": "DocuFlow API"}
