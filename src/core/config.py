@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     MINIO_BUCKET_NAME: str = "docuflow-documents"
     MINIO_SECURE: bool = False
 
+    # Google Gemini API Key
+    GOOGLE_API_KEY: str = ""
+
     # 🟢 Yahan defaults update karein taake field required na rahe validation ke waqt
     DATABASE_URI: str = ""
 

@@ -12,6 +12,7 @@ from src.api.v1.auth import router as auth_router
 from src.api.v1.documents import router as doc_router
 from src.api.v1.notification import router as notification_router
 from src.api.v1.organizations import router as org_router
+from src.api.v1.rag import router as rag_router
 from src.api.v1.rbac import router as rbac_router
 from src.core.database import engine
 from src.core.limiter import limiter
@@ -55,6 +56,7 @@ app.include_router(rbac_router, prefix="/api/v1", tags=["RBAC"])
 app.include_router(comment.router, prefix="/api/v1", tags=["Comments"])
 app.include_router(audit_router, prefix="/api/v1", tags=["Audit Logs"])
 app.include_router(notification_router, prefix="/api/v1", tags=["Notifications"])
+app.include_router(rag_router, prefix="/api/v1/rag", tags=["RAG"])
 
 
 @app.get("/health", tags=["Health"])

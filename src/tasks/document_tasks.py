@@ -1,5 +1,7 @@
 import asyncio
 import io
+import os
+import uuid
 
 from pypdf import PdfReader
 from sqlalchemy import update
@@ -8,29 +10,39 @@ from src.core.config import settings
 from src.core.database import SessionLocal
 from src.core.minio import client as minio_client
 from src.models import Document
+from src.services.rag_service import RAGService
 from src.tasks import celery_app
+
+# Network checks disable karke local cached model instant load karein
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 
 def run_async(coro):
-    """Safely execute async DB updates inside a synchronous Celery worker thread."""
+    """Safely execute async DB operations inside a synchronous Celery worker thread."""
     return asyncio.run(coro)
 
 
-async def _update_document_status(
+async def _process_rag_and_update_status(
     document_id: str, status: str, extracted_text: str | None = None
 ):
-    async with SessionLocal() as session:
-        values_to_update = {"processing_status": status}
+    """Save RAG chunks/embeddings and update document status."""
+    doc_id = uuid.UUID(document_id)
 
+    async with SessionLocal() as session:
+        # 1. Generate & Store RAG embeddings if text exists & status is completed
+        if status == "completed" and extracted_text and extracted_text.strip():
+            rag_service = RAGService(db_session=session)
+            await rag_service.process_and_store_document(
+                document_id=doc_id, text=extracted_text
+            )
+
+        # 2. Update document status and extracted content
+        values_to_update = {"processing_status": status}
         if extracted_text is not None:
             values_to_update["extracted_content"] = extracted_text
 
-        query = (
-            update(Document)
-            .where(Document.id == document_id)
-            .values(**values_to_update)
-        )
-
+        query = update(Document).where(Document.id == doc_id).values(**values_to_update)
         await session.execute(query)
         await session.commit()
 
@@ -80,7 +92,10 @@ def process_document_task(
                     response.close()
                     response.release_conn()
 
-        run_async(_update_document_status(document_id, "completed", extracted_text))
+        # Success path: save embeddings & set status completed
+        run_async(
+            _process_rag_and_update_status(document_id, "completed", extracted_text)
+        )
 
         return {
             "status": "COMPLETED",
@@ -93,7 +108,8 @@ def process_document_task(
 
         if self.request.retries >= self.max_retries - 1:
             print(f"Max retries reached for document {document_id}")
-            run_async(_update_document_status(document_id, "failed"))
+            # Failure path: set status failed
+            run_async(_process_rag_and_update_status(document_id, "failed", None))
             raise exc
 
         raise self.retry(exc=exc, countdown=5)
