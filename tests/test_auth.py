@@ -1,7 +1,10 @@
 import pytest
 from httpx import AsyncClient
 
+from pydantic import ValidationError
+
 from src.core.security import create_access_token, create_refresh_token
+from src.schemas.auth import UserCreate
 from tests.conftest import LOGIN_PASSWORD
 
 
@@ -170,3 +173,45 @@ async def test_me_rejects_garbage_bearer_token(client: AsyncClient):
     )
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid token"
+
+
+@pytest.mark.parametrize(
+    "weak",
+    [
+        "user1",
+        "password",
+        "password123",
+        "12345678901",
+        "docuflow123",
+        "short",
+        "a" * 200,
+    ],
+)
+def test_weak_passwords_are_rejected(weak: str):
+    """Registration must refuse guessable or over-long passwords."""
+    with pytest.raises(ValidationError):
+        UserCreate(email="a@b.com", password=weak)
+
+
+@pytest.mark.parametrize(
+    "strong",
+    [
+        "correct-horse-battery-staple",
+        "a-very-long-passphrase-2026",
+    ],
+)
+def test_strong_passwords_are_accepted(strong: str):
+    assert UserCreate(email="a@b.com", password=strong).password == strong
+
+
+@pytest.mark.asyncio
+async def test_register_endpoint_enforces_password_policy(
+    client: AsyncClient, vacant_db_session, install_session
+):
+    install_session(vacant_db_session)
+    response = await client.post(
+        "/api/v1/auth/register",
+        json={"email": "weak@example.com", "password": "user1"},
+    )
+    assert response.status_code == 422
+    assert any("at least" in e.get("msg", "") for e in response.json()["detail"])

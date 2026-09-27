@@ -257,7 +257,7 @@ docuflow-backend/
 │   ├── services/                 # business logic, RAG, embedding, storage
 │   ├── tasks/                    # Celery app + document pipeline
 │   └── utils/chunking.py         # sliding-window splitter
-└── tests/                        # pytest suite, 79 tests (statement-aware fake DB)
+└── tests/                        # pytest suite, 89 tests (statement-aware fake DB)
 ```
 
 ---
@@ -360,7 +360,7 @@ curl -X POST http://localhost:8000/api/v1/rag/query \
 ## Testing & CI
 
 ```bash
-pytest              # 79 tests
+pytest              # 89 tests
 ruff check src/ tests/ scripts/
 ruff format --check src/ tests/ scripts/
 ```
@@ -383,15 +383,22 @@ rotated, and the check is there to stop it happening again.
 ## Security
 
 - `.env` is git-ignored and has never been committed; CI enforces this.
-- Passwords are hashed with Argon2. `SECRET_KEY`, the database password, the MinIO keys and
-  the Gemini key have all been rotated off their defaults.
+- Passwords are hashed with Argon2 and validated on registration: minimum 12 characters, a
+  128-character ceiling (bcrypt/Argon2 truncate beyond 72 bytes, which would otherwise make
+  two different passwords equivalent), and a rejection list of the most common passwords.
+  `user1` and `password123` do not pass.
+- `SECRET_KEY`, the database password, the MinIO keys and the Gemini key have all been
+  rotated off their defaults.
 - Postgres and Redis bind to `127.0.0.1` only; only SSH and the API port are exposed.
 - RAG queries require `document:read` and are rate limited to 30/min.
 - Authorization is deny-by-default.
 
-> **Deployment note:** the Azure instance runs behind a private HTTPS tunnel rather than a
-> public port, and the API binds to loopback behind it. Postgres, Redis and MinIO are not
-> reachable from the internet.
+> **Deployment note:** the Azure instance exposes the API on port 8000 over plain HTTP.
+> Tailscale is installed and authenticated on the host, and `tailscale serve` will put a
+> certificate-backed HTTPS endpoint in front of it in about a minute, but the tailnet
+> feature still has to be switched on once in the Tailscale admin console — so today this
+> deployment is *not* yet HTTPS. Postgres, Redis and MinIO are not reachable from the
+> internet, which is checked with an external port scan.
 
 ---
 
@@ -399,7 +406,8 @@ rotated, and the check is there to stop it happening again.
 
 - [ ] Replace the hard-coded Celery broker URL with a setting
 - [ ] Real integration tests against a live Postgres + pgvector instance
-- [ ] TLS via a real domain instead of the tunnel
+- [ ] HTTPS in front of the API (Tailscale Serve/Funnel — awaiting the one-time
+      admin-console toggle)
 - [ ] OCR for scanned PDFs (`pypdf` only reads text layers)
 - [ ] Presigned upload/download URLs that work outside the host
 - [ ] Hybrid retrieval (BM25 + vector) and a re-ranker
