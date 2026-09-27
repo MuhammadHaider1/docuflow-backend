@@ -389,7 +389,8 @@ rotated, and the check is there to stop it happening again.
   `user1` and `password123` do not pass.
 - `SECRET_KEY`, the database password, the MinIO keys and the Gemini key have all been
   rotated off their defaults.
-- Postgres and Redis bind to `127.0.0.1` only; only SSH and the API port are exposed.
+- Postgres, Redis and MinIO all bind to `127.0.0.1`; only SSH and the API port are
+  published, and an external scan confirms nothing else answers.
 - RAG queries require `document:read` and are rate limited to 30/min.
 - Authorization is deny-by-default.
 
