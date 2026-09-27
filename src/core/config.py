@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     MINIO_BUCKET_NAME: str = "docuflow-documents"
     MINIO_SECURE: bool = False
 
+    # Embeddings: when this directory exists the model is loaded from disk and
+    # HuggingFace is never contacted. Otherwise the hub id is used instead.
+    EMBEDDING_MODEL_PATH: str = "models/all-MiniLM-L6-v2"
+    EMBEDDING_MODEL_ID: str = "all-MiniLM-L6-v2"
+
     # Google Gemini API Key
     GOOGLE_API_KEY: str = ""
 

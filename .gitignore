@@ -20,6 +20,9 @@ ENV/
 uploads/
 media/
 
+# Locally cached model weights (see EMBEDDING_MODEL_PATH)
+models/
+
 # Logs
 *.log
 logs/

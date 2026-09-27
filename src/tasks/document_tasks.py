@@ -1,6 +1,5 @@
 import asyncio
 import io
-import os
 import uuid
 
 from pypdf import PdfReader
@@ -12,10 +11,6 @@ from src.core.minio import client as minio_client
 from src.models import Document
 from src.services.rag_service import RAGService
 from src.tasks import celery_app
-
-# Network checks disable karke local cached model instant load karein
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 
 def run_async(coro):
