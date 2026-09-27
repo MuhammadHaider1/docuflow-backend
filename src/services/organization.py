@@ -1,5 +1,5 @@
 import uuid
-from typing import List, Optional
+from typing import List
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +8,9 @@ from src.models.organization import Organization
 from src.repositories.organization import OrganizationRepository
 from src.repositories.user import UserRepository
 from src.schemas.organization import OrganizationCreate, OrganizationUpdate
+
+# Role granted to whoever creates an organization.
+OWNER_ROLE_NAME = "Organization Owner"
 
 
 class OrganizationService:
@@ -27,22 +30,24 @@ class OrganizationService:
                 detail="Slug is already in use, please try a different one.",
             )
 
-        # 2. Get Admin role if exists (Safely fallback to None)
-        db_role = await self.user_repo.get_role_by_name("Viewer")
-        if not db_role:
+        # 2. The creator owns the new organization, so they get the owner role.
+        owner_role = await self.user_repo.get_role_by_name(OWNER_ROLE_NAME)
+        if not owner_role:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Default role 'Member' does not exist in database. Please run seeders.",
+                detail=(
+                    f"Default role '{OWNER_ROLE_NAME}' does not exist in database. "
+                    "Please run the RBAC seeder."
+                ),
             )
-        role_uuid: Optional[uuid.UUID] = db_role.id if db_role else None
 
         try:
             # 3. Create Organization
             new_org = await self.org_repo.create(payload)
 
-            # 4. Attach Creator as Member
+            # 4. Attach Creator as owner
             await self.org_repo.create_membership(
-                user_id=user_id, org_id=new_org.id, role_id=role_uuid
+                user_id=user_id, org_id=new_org.id, role_id=owner_role.id
             )
 
             # Commit both operations together
