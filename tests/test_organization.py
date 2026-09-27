@@ -10,34 +10,104 @@ from src.services.organization import OWNER_ROLE_NAME, OrganizationService
 
 
 @pytest.mark.asyncio
-async def test_create_organization(auth_client: AsyncClient):
-    """Verify creating a new organization endpoint."""
+async def test_create_organization_returns_201(auth_client: AsyncClient, db_session):
     response = await auth_client.post(
         "/api/v1/organizations/",
         json={"name": "Test Tech Corp", "slug": "test-tech-corp"},
-        follow_redirects=True,
     )
-    assert response.status_code in [200, 201, 400, 404, 422, 500]
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["name"] == "Test Tech Corp"
+    assert body["slug"] == "test-tech-corp"
+    assert body["is_active"] is True
+    assert db_session.commits >= 1
 
 
 @pytest.mark.asyncio
-async def test_list_organizations(auth_client: AsyncClient):
-    """Verify listing organizations endpoint."""
-    response = await auth_client.get("/api/v1/organizations", follow_redirects=True)
-    assert response.status_code in [200, 403, 404, 422, 500]
+async def test_create_organization_requires_authentication(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/organizations/", json={"name": "Nope", "slug": "nope"}
+    )
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_organization_membership(auth_client: AsyncClient):
-    """Verify adding membership to an organization endpoint."""
-    org_id = uuid.uuid4()
-    user_id = uuid.uuid4()
+async def test_create_organization_rejects_duplicate_slug(
+    auth_client: AsyncClient, db_session, install_session
+):
+    """A second organization with the same slug must be a 400, not a silent success."""
+    from src.models.organization import Organization
+
+    from tests.conftest import FakeSession
+
+    existing = Organization(id=uuid.uuid4(), name="Taken", slug="test-tech-corp")
+    FakeSession._backfill(existing)
+    session = FakeSession(
+        user=db_session.user, org_id=db_session.org_id, documents=db_session.documents
+    )
+    original_execute = session.execute
+
+    async def execute(stmt):
+        result = await original_execute(stmt)
+        if "Organization" in session._entities(stmt):
+            return type(result)(scalars=[existing])
+        return result
+
+    session.execute = execute
+    install_session(session)
     response = await auth_client.post(
-        f"/api/v1/organizations/{org_id}/members",
-        json={"user_id": str(user_id), "role_id": None},
-        follow_redirects=True,
+        "/api/v1/organizations/",
+        json={"name": "Test Tech Corp", "slug": "test-tech-corp"},
     )
-    assert response.status_code in [200, 201, 400, 403, 404, 422, 500]
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Slug is already in use, please try a different one."
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_organizations_redirects_to_canonical_path(
+    auth_client: AsyncClient,
+):
+    """The collection lives at the trailing-slash path; the bare one redirects."""
+    response = await auth_client.get("/api/v1/organizations")
+    assert response.status_code == 307
+    assert response.headers["location"].endswith("/api/v1/organizations/")
+
+
+@pytest.mark.asyncio
+async def test_list_organizations_returns_list(auth_client: AsyncClient):
+    response = await auth_client.get("/api/v1/organizations/")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_list_organizations_requires_authentication(client: AsyncClient):
+    response = await client.get("/api/v1/organizations/")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_get_organization_requires_authentication(client: AsyncClient):
+    response = await client.get(f"/api/v1/organizations/{uuid.uuid4()}")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_get_organization_rejects_non_uuid(client: AsyncClient):
+    """Shape validation happens before the auth dependency is exercised."""
+    response = await client.get("/api/v1/organizations/not-a-uuid")
+    assert response.status_code in (401, 422)
+
+
+@pytest.mark.asyncio
+async def test_unknown_organization_is_404(
+    auth_client: AsyncClient, empty_db_session, install_session
+):
+    install_session(empty_db_session)
+    response = await auth_client.get(f"/api/v1/organizations/{uuid.uuid4()}")
+    assert response.status_code == 404
 
 
 def _service_with_repos():
@@ -75,6 +145,26 @@ async def test_org_creator_is_assigned_owner_role():
 
 
 @pytest.mark.asyncio
+async def test_org_creation_never_falls_back_to_viewer():
+    """Regression guard: the role lookup must not silently resolve to Viewer."""
+    service = _service_with_repos()
+    service.org_repo.get_by_slug.return_value = None
+    service.user_repo.get_role_by_name.return_value = None
+
+    with pytest.raises(HTTPException):
+        await service.register_new_organization(
+            OrganizationCreate(name="Acme", slug="acme"), uuid.uuid4()
+        )
+
+    requested = {
+        call.args[0] for call in service.user_repo.get_role_by_name.await_args_list
+    }
+    assert requested == {OWNER_ROLE_NAME}
+    assert "Viewer" not in requested
+    service.org_repo.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_org_creation_fails_when_owner_role_missing():
     """Seeder chalaya nahi gaya to user ko silently Viewer role na mile."""
     service = _service_with_repos()
@@ -89,3 +179,18 @@ async def test_org_creation_fails_when_owner_role_missing():
     assert exc_info.value.status_code == 404
     assert OWNER_ROLE_NAME in exc_info.value.detail
     service.org_repo.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_slug_is_rejected_before_creating():
+    service = _service_with_repos()
+    service.org_repo.get_by_slug.return_value = MagicMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.register_new_organization(
+            OrganizationCreate(name="Acme", slug="acme"), uuid.uuid4()
+        )
+
+    assert exc_info.value.status_code == 400
+    service.org_repo.create.assert_not_awaited()
+    service.user_repo.get_role_by_name.assert_not_awaited()

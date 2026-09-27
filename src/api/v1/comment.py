@@ -42,7 +42,7 @@ async def create_comment(
     status_code=status.HTTP_200_OK,
 )
 async def get_document_comments(
-    doc_id: uuid.UUID,
+    document_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),
@@ -50,7 +50,7 @@ async def get_document_comments(
 ):
     service = CommentService(db)
     return await service.get_document_comments(
-        document_id=doc_id, org_id=x_organization_id
+        document_id=document_id, org_id=x_organization_id
     )
 
 

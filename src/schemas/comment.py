@@ -1,17 +1,17 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CommentCreate(BaseModel):
-    content: str
+    content: str = Field(min_length=1, max_length=5000)
     parent_id: uuid.UUID | None = None
 
 
 # 👈 Missing Schema for Comment Editing
 class CommentUpdate(BaseModel):
-    content: str
+    content: str = Field(min_length=1, max_length=5000)
 
 
 class UserMinResponse(BaseModel):

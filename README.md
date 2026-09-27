@@ -207,6 +207,13 @@ because the assertions were `assert response.status_code in [200, 400, 404, 422,
 which passes for almost any response. Fixed, and the test now asserts the exact role id;
 it was verified to fail against the old code.
 
+**5. A live endpoint returned 422 to every caller.** `GET /comments/documents/{document_id}/comments`
+declared its path parameter as `doc_id`, so FastAPI treated the id as a *required query
+parameter* and the endpoint could never succeed. The test for it had been pointed at
+`/api/v1/comments/`, a path that does not exist, and asserted the 404 — a green test that
+exercised nothing. Both are fixed: the parameter is named correctly, the tests call real
+routes, and a tenant-isolation test now proves another tenant's document returns 404.
+
 ---
 
 ## Tech stack
@@ -250,7 +257,7 @@ docuflow-backend/
 │   ├── services/                 # business logic, RAG, embedding, storage
 │   ├── tasks/                    # Celery app + document pipeline
 │   └── utils/chunking.py         # sliding-window splitter
-└── tests/                        # pytest suite (mocked DB session)
+└── tests/                        # pytest suite, 79 tests (statement-aware fake DB)
 ```
 
 ---
@@ -353,7 +360,7 @@ curl -X POST http://localhost:8000/api/v1/rag/query \
 ## Testing & CI
 
 ```bash
-pytest              # 20 tests
+pytest              # 79 tests
 ruff check src/ tests/ scripts/
 ruff format --check src/ tests/ scripts/
 ```
