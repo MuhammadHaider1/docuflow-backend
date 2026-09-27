@@ -394,12 +394,18 @@ rotated, and the check is there to stop it happening again.
 - RAG queries require `document:read` and are rate limited to 30/min.
 - Authorization is deny-by-default.
 
-> **Deployment note:** the Azure instance exposes the API on port 8000 over plain HTTP.
-> Tailscale is installed and authenticated on the host, and `tailscale serve` will put a
-> certificate-backed HTTPS endpoint in front of it in about a minute, but the tailnet
-> feature still has to be switched on once in the Tailscale admin console — so today this
-> deployment is *not* yet HTTPS. Postgres, Redis and MinIO are not reachable from the
-> internet, which is checked with an external port scan.
+> **Deployment note:** the Azure instance publishes **no application port at all**. Uvicorn
+> binds to `127.0.0.1:8000` and is reached only through Tailscale Serve, which terminates a
+> real Let's Encrypt certificate:
+>
+> ```
+> https://docuflow-api.tailc249f9.ts.net/docs
+> ```
+>
+> That is a private address — it resolves and answers only from devices on the tailnet, so
+> it will not load on a random machine. An external scan of the host shows **22 (SSH) as the
+> only open port**; Postgres, Redis, MinIO and the API's own port are all unreachable from
+> the internet.
 
 ---
 
@@ -407,8 +413,9 @@ rotated, and the check is there to stop it happening again.
 
 - [ ] Replace the hard-coded Celery broker URL with a setting
 - [ ] Real integration tests against a live Postgres + pgvector instance
-- [ ] HTTPS in front of the API (Tailscale Serve/Funnel — awaiting the one-time
-      admin-console toggle)
+- [x] HTTPS in front of the API (Tailscale Serve, Let's Encrypt)
+- [ ] A public demo URL — Tailscale Serve is deliberately private, so a recruiter outside
+      the tailnet cannot open the docs link
 - [ ] OCR for scanned PDFs (`pypdf` only reads text layers)
 - [ ] Presigned upload/download URLs that work outside the host
 - [ ] Hybrid retrieval (BM25 + vector) and a re-ranker
