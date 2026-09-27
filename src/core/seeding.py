@@ -38,7 +38,13 @@ async def seed__rbac(db: AsyncSession) -> None:
         {"name": "document:read", "description": "Can view documents"},
         {"name": "document:update", "description": "Can edit documents"},
         {"name": "document:delete", "description": "Can delete documents"},
-        # Organization Permissions (NEW) 🎯
+        # Folder Permissions
+        {"name": "folder:create", "description": "Can create folders"},
+        # Member Permissions
+        {"name": "members:invite", "description": "Can invite members"},
+        {"name": "members:manage_roles", "description": "Can assign or revoke roles"},
+        {"name": "members:remove", "description": "Can remove members"},
+        # Organization Permissions
         {"name": "organization:read", "description": "Can view organization details"},
         {
             "name": "organization:update",
@@ -65,73 +71,103 @@ async def seed__rbac(db: AsyncSession) -> None:
 
 async def seed_role_permissions(db: AsyncSession) -> None:
     ROLE_PERMISSIONS_MAPPING = {
+        # 1. Super Admin -> Full access to everything
         "Super Admin": [
             "document:create",
             "document:read",
             "document:update",
             "document:delete",
+            "folder:create",
+            "members:invite",
+            "members:manage_roles",
+            "members:remove",
             "organization:read",
             "organization:update",
             "organization:manage",
         ],
+        # 2. Platform Admin -> Full access to everything
         "Platform Admin": [
             "document:create",
             "document:read",
             "document:update",
             "document:delete",
+            "folder:create",
+            "members:invite",
+            "members:manage_roles",
+            "members:remove",
             "organization:read",
             "organization:update",
             "organization:manage",
         ],
-        # 2. Organization Owner -> Org manage + All Document actions
+        # 3. Organization Owner -> Org manage + all document actions + member roles
         "Organization Owner": [
             "document:create",
             "document:read",
             "document:update",
             "document:delete",
+            "folder:create",
+            "members:invite",
+            "members:manage_roles",
+            "members:remove",
             "organization:read",
             "organization:update",
+            "organization:manage",
         ],
-        # 3. Workspace Admin -> Org read/update + Document create/read/update
+        # 4. Workspace Admin -> Document CRUD + folder create + invite members
         "Workspace Admin": [
             "document:create",
             "document:read",
             "document:update",
+            "document:delete",
+            "folder:create",
+            "members:invite",
             "organization:read",
             "organization:update",
         ],
-        # 4. Reviewer -> Read documents + Update (comments/metadata/versions)
+        # 5. Reviewer -> Read documents + Update (comments/metadata/versions)
         "Reviewer": [
             "document:read",
             "document:update",
             "organization:read",
         ],
-        # 5. Contributor -> Create, Read, Update documents
+        # 6. Contributor -> Create, Read, Update documents
         "Contributor": [
             "document:create",
             "document:read",
             "document:update",
+            "folder:create",
             "organization:read",
         ],
-        # 6. Viewer -> Read-only access
+        # 7. Viewer -> Read-only access
         "Viewer": [
             "document:read",
             "organization:read",
         ],
     }
     repo = RBACRepository(db)
+    missing: list[str] = []
 
     for role_name, perm_names in ROLE_PERMISSIONS_MAPPING.items():
         role = await repo.get_role_by_name(role_name)
         if not role:
+            missing.append(f"role '{role_name}'")
             continue
 
         for perm_name in perm_names:
             perm = await repo.get_permission_by_name(perm_name)
-            if perm:
-                await repo.assign_permission_to_role(role, perm)
+            if perm is None:
+                missing.append(f"permission '{perm_name}' (for role '{role_name}')")
+                continue
+            await repo.assign_permission_to_role(role, perm)
 
     await db.commit()
+
+    if missing:
+        print("⚠️  RBAC seeding finished with unresolved references:")
+        for item in missing:
+            print(f"   - {item}")
+    else:
+        print("✅ All roles and permissions resolved and assigned.")
 
 
 # ---------------------------------------------------------
