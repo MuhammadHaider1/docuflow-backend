@@ -1,6 +1,7 @@
 import pytest
 from httpx import AsyncClient
 
+from fastapi import status
 from pydantic import ValidationError
 
 from src.core.security import create_access_token, create_refresh_token
@@ -215,3 +216,32 @@ async def test_register_endpoint_enforces_password_policy(
     )
     assert response.status_code == 422
     assert any("at least" in e.get("msg", "") for e in response.json()["detail"])
+
+
+@pytest.mark.asyncio
+async def test_login_is_rate_limited(
+    client: AsyncClient, vacant_db_session, install_session
+):
+    """A public deployment must cap login attempts.
+
+    The limiter is the only thing standing between an exposed /auth/login and
+    an offline password-guessing loop, so this asserts the 429 actually fires
+    rather than trusting the decorator is present.
+    """
+    install_session(vacant_db_session)
+    codes = []
+    for _ in range(7):
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "victim@example.com", "password": "guess-guess-guess"},
+        )
+        codes.append(response.status_code)
+        if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            break
+
+    assert status.HTTP_429_TOO_MANY_REQUESTS in codes, (
+        f"login was never rate limited: {codes}"
+    )
+    # The cap must fire well before an attacker gets an unbounded number of
+    # guesses, not merely eventually.
+    assert len(codes) <= 6, f"too many attempts allowed before throttling: {codes}"

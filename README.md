@@ -391,7 +391,10 @@ rotated, and the check is there to stop it happening again.
   rotated off their defaults.
 - Postgres, Redis and MinIO all bind to `127.0.0.1`; only SSH and the API port are
   published, and an external scan confirms nothing else answers.
-- RAG queries require `document:read` and are rate limited to 30/min.
+- Every one of the 38 routes carries a rate limit. `POST /auth/login` and
+  `POST /auth/register` are capped at **5/minute** and `POST /auth/refresh` at 10/minute, so a
+  public deployment cannot be used for offline password guessing; `tests/test_auth.py` asserts
+  the 429 actually fires rather than trusting the decorator is present.
 - Authorization is deny-by-default.
 
 > **Deployment note:** the Azure instance publishes **no application port at all**. Uvicorn

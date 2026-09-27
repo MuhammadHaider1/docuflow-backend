@@ -1,10 +1,11 @@
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
+from src.core.limiter import limiter
 from src.core.security import is_authenticated
 from src.models.auth import User
 from src.schemas.organization import (
@@ -23,7 +24,9 @@ router = APIRouter(prefix="/organizations", tags=["Organizations"])
     response_model=OrganizationResponse,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("20/minute")
 async def create_new_organization(
+    request: Request,
     payload: OrganizationCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),
@@ -40,7 +43,9 @@ async def create_new_organization(
     response_model=List[OrganizationResponse],
     status_code=status.HTTP_200_OK,
 )
+@limiter.limit("60/minute")
 async def get_my_organizations(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),
 ):
@@ -54,7 +59,9 @@ async def get_my_organizations(
     response_model=OrganizationResponse,
     status_code=status.HTTP_200_OK,
 )
+@limiter.limit("60/minute")
 async def get_organization_by_id(
+    request: Request,
     org_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),
@@ -71,7 +78,9 @@ async def get_organization_by_id(
     response_model=OrganizationResponse,
     status_code=status.HTTP_200_OK,
 )
+@limiter.limit("30/minute")
 async def update_organization(
+    request: Request,
     org_id: uuid.UUID,
     payload: OrganizationUpdate,
     db: AsyncSession = Depends(get_db),
@@ -88,7 +97,9 @@ async def update_organization(
     "/{org_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
+@limiter.limit("20/minute")
 async def delete_organization(
+    request: Request,
     org_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),

@@ -1,11 +1,12 @@
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import PermissionChecker
 from src.core.database import get_db
+from src.core.limiter import limiter
 from src.core.security import is_authenticated
 from src.models.auth import User
 from src.schemas.comment import CommentCreate, CommentResponse, CommentUpdate
@@ -19,7 +20,9 @@ router = APIRouter(prefix="/comments", tags=["Comments"])
     response_model=CommentResponse,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit("30/minute")
 async def create_comment(
+    request: Request,
     document_id: uuid.UUID,
     payload: CommentCreate,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
@@ -41,7 +44,9 @@ async def create_comment(
     response_model=List[CommentResponse],
     status_code=status.HTTP_200_OK,
 )
+@limiter.limit("60/minute")
 async def get_document_comments(
+    request: Request,
     document_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -59,7 +64,9 @@ async def get_document_comments(
     response_model=CommentResponse,
     status_code=status.HTTP_200_OK,
 )
+@limiter.limit("30/minute")
 async def update_comment(
+    request: Request,
     comment_id: uuid.UUID,
     payload: CommentUpdate,
     db: AsyncSession = Depends(get_db),
@@ -74,7 +81,9 @@ async def update_comment(
 
 
 @router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("30/minute")
 async def delete_comment(
+    request: Request,
     comment_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),

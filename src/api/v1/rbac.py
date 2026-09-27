@@ -1,10 +1,11 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import PermissionChecker
 from src.core.database import get_db
+from src.core.limiter import limiter
 from src.core.security import is_authenticated
 from src.models.auth import User
 from src.schemas.rbac import AssignRoleRequest, RevokeRoleRequest
@@ -19,7 +20,9 @@ router = APIRouter(prefix="/rbac", tags=["RBAC"])
 
 
 @router.get("/roles")
+@limiter.limit("60/minute")
 async def get_all_roles(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),
 ):
@@ -28,7 +31,9 @@ async def get_all_roles(
 
 
 @router.get("/permissions")
+@limiter.limit("60/minute")
 async def get_all_permissions(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(is_authenticated),
 ):
@@ -42,7 +47,9 @@ async def get_all_permissions(
 
 
 @router.post("/assign-role", status_code=status.HTTP_200_OK)
+@limiter.limit("20/minute")
 async def assign_role_to_member(
+    request: Request,
     payload: AssignRoleRequest,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -57,7 +64,9 @@ async def assign_role_to_member(
 
 
 @router.post("/revoke-role", status_code=status.HTTP_200_OK)
+@limiter.limit("20/minute")
 async def revoke_role_from_member(
+    request: Request,
     payload: RevokeRoleRequest,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
@@ -72,7 +81,9 @@ async def revoke_role_from_member(
 
 
 @router.get("/members/{user_id}/role")
+@limiter.limit("60/minute")
 async def get_member_role(
+    request: Request,
     user_id: uuid.UUID,
     x_organization_id: uuid.UUID = Header(..., alias="X-Organization-Id"),
     db: AsyncSession = Depends(get_db),
