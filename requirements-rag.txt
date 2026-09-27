@@ -1,0 +1,17 @@
+# ---------------------------------------------------------------------------
+# Optional: local embedding model for the RAG pipeline.
+#
+#   pip install -r requirements.txt -r requirements-rag.txt
+#
+# The API, auth, RBAC, documents, audit and notifications all run without
+# these. They are only needed to turn a document into vector chunks or to
+# answer a RAG query, because the sentence-transformers import is deferred
+# until EmbeddingService is first constructed. Keeping the ~2 GB PyTorch
+# stack out of requirements.txt means a core install stays small and CI
+# stays fast.
+# ---------------------------------------------------------------------------
+sentence-transformers==6.0.1
+transformers==5.16.1
+torch==2.13.0
+tokenizers==0.23.1
+safetensors==0.8.0
