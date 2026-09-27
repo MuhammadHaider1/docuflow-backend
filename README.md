@@ -1,258 +1,406 @@
-# DocuFlow Backend API
+# DocuFlow
 
-> Enterprise-grade asynchronous **document management** and **notification processing** backend, purpose-built for **multi-tenant** SaaS workflows and designed to evolve into an **AI-powered document intelligence platform**.
+**Multi-tenant document management backend with built-in RAG** — upload a PDF, and ask questions about it in natural language. Answers are grounded in your own tenant's documents and streamed back token by token.
 
-Built with **FastAPI**, **PostgreSQL**, **SQLAlchemy 2.0 (Async)**, **Alembic**, **Redis/Celery**, and **MinIO (S3-compatible object storage)**.
+![CI](https://github.com/MuhammadHaider1/docuflow-backend/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.139-009688?logo=fastapi&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
 
----
+Upload a PDF → a Celery worker extracts the text → chunks it → generates 384-dimensional
+embeddings → stores them in **pgvector**. Then `POST /rag/query` runs a cosine-similarity
+search scoped to your organization, feeds the top chunks to Gemini, and streams the answer back.
 
-## ✨ Highlights
-
-- **Multi-Tenant SaaS Architecture** — Organizations, memberships, and organization-scoped resources with `UUID` primary keys and `X-Organization-Id`-aware isolation.
-- **JWT Authentication & Authorization** — Access + refresh token flow with Argon2/bcrypt password hashing via `pwdlib`.
-- **Role-Based Access Control (RBAC)** — `Role`, `Permission` and `RolePermission` (many-to-many) models with organization-scoped roles and member role assignment/revocation.
-- **Hierarchical Document Management** — Folders (nested parent/child trees) and `Document` + `DocumentVersion` models supporting multi-version document lineage.
-- **Background Intelligence** — Celery + Redis workers offload heavy document processing (e.g., PDF text extraction via `pypdf`) without blocking API threads.
-- **Compliance-Grade Audit Logging** — Asynchronous event-driven audit trail capturing action, entity, user, IP, and JSONB details.
-- **Notification System** — Read/unread + bulk notification operations per user.
-- **Object Storage** — MinIO (S3-compatible) integration with automatic bucket initialization.
-- **API Rate Limiting** — SlowAPI middleware protecting endpoints.
-- **Versioned DB Migrations** — Alembic for reproducible PostgreSQL schema evolution.
+> **Solo project** — architecture, backend, RBAC, the RAG pipeline, deployment and
+> production debugging were all done by me.
 
 ---
 
-## 🧠 AI & Vector Search (Planned / Roadmap)
+## Contents
 
-Docuflow is architected to grow into an intelligent document platform. The following **AI-driven capabilities are designed into the architecture and are on the roadmap**:
-
-- **Vector Search RAG Integration** — An enterprise Retrieval-Augmented Generation (RAG) pipeline using **pgvector** and **LangChain**, enabling semantic search, dynamic text chunking, and context-aware question-answering over multi-tenant document stores.
-- **Async Background Intelligence** — Extending Celery+Redis workers to run background **OCR**, automated text extraction, and **vector embedding generation** without blocking core API threads.
-- **Smart Document Insights** — LLM-powered summarization, entity extraction, and intelligent document classification built on the existing `extracted_content` pipeline.
-- **Context-Aware QA** — Chat-style question answering grounded in an organization's own document corpus (retrieval over tenant-isolated vector indexes).
-
-> The existing `processing_status` lifecycle, `extracted_content` column, Celery task orchestration, and MinIO object pipeline lay the foundation for these AI features.
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [The RAG pipeline](#the-rag-pipeline)
+- [Multi-tenancy & RBAC](#multi-tenancy--rbac)
+- [Production debugging](#production-debugging)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [Setup](#setup)
+- [API surface](#api-surface)
+- [Testing & CI](#testing--ci)
+- [Security](#security)
+- [Roadmap](#roadmap)
 
 ---
 
-## 🏗️ Architecture
+## What it does
 
-The codebase follows a clean **layered architecture** separating concerns across the request path:
+| Capability | Detail |
+|---|---|
+| **Multi-tenant SaaS** | Organizations, memberships, and every resource scoped by `X-Organization-Id` |
+| **RAG over your documents** | Semantic search + grounded answers, **tenant-isolated** at the SQL level |
+| **Streaming answers** | Server-Sent-Events style `text/plain` stream via `StreamingResponse` |
+| **RBAC** | 7 roles, 11 permissions, 51 role→permission links, enforced by a reusable dependency |
+| **Async document processing** | Celery + Redis; PDF text extraction never blocks a request |
+| **Versioned storage** | `Document` + `DocumentVersion` lineage, objects in MinIO (S3-compatible) |
+| **Hierarchical folders** | Nested parent/child tree, cascade-safe deletes |
+| **Audit log** | Async trail of actor, action, entity, IP and JSONB detail |
+| **Notifications** | Per-user read/unread with bulk operations |
+| **Rate limiting** | SlowAPI, e.g. 30 req/min on RAG endpoints |
+
+**Scale:** 4,200+ lines across 71 Python files · 10 routers · 10 model modules · 7 Alembic migrations.
+
+---
+
+## Architecture
+
+Layered, so a request never skips straight to the database:
 
 ```
-HTTP Request
-   │
-   ▼
-┌──────────────┐   FastAPI Routers (src/api/v1) — routing + auth deps
-│     API      │
-└──────┬───────┘
-       ▼
-┌──────────────┐   Business logic (src/services)
-│  SERVICES    │   orchestrates repositories, storage & tasks
-└──────┬───────┘
-       ▼
-┌──────────────┐   Data access (src/repositories)
-│ REPOSITORIES │   isolated DB queries per entity
-└──────┬───────┘
-       ▼
-┌──────────────┐   SQLAlchemy 2.0 async models (src/models)
-│   MODELS     │   PostgreSQL + asyncpg
-└──────────────┘
+                         ┌──────────────────────────────┐
+   HTTP request  ───────►│  API        src/api/v1       │  routing, auth deps,
+                         │              PermissionChecker│  rate limiting
+                         └───────────────┬──────────────┘
+                                         ▼
+                         ┌──────────────────────────────┐
+                         │  SERVICES    src/services    │  business logic,
+                         │              RAGService      │  storage, AI calls
+                         └───────┬──────────────┬───────┘
+                                 ▼              ▼
+              ┌──────────────────────┐   ┌──────────────────────┐
+              │ REPOSITORIES         │   │ TASKS    src/tasks   │
+              │ src/repositories     │   │ Celery: PDF → chunk  │
+              │ per-entity queries   │   │ → embed → pgvector   │
+              └──────────┬───────────┘   └──────────┬───────────┘
+                         ▼                          ▼
+              ┌────────────────────────────────────────────┐
+              │  PostgreSQL + pgvector   │   Redis   MinIO  │
+              │  asyncpg / SQLAlchemy 2.0 │  broker   S3     │
+              └────────────────────────────────────────────┘
 ```
 
-**Async Background Layer:** `src/tasks` — Celery worker executes heavy document workloads (e.g., `process_document_task`) decoupled from the request cycle.
+### Two details worth calling out
+
+**CPU-bound work is pushed off the event loop.** Embedding generation is synchronous and
+blocking, but it runs inside an async request path. Rather than stalling every concurrent
+request, `RAGService` hands it to a thread pool:
+
+```python
+loop = asyncio.get_running_loop()
+embeddings = await loop.run_in_executor(
+    None, self.embedding_service.get_embeddings_batch, raw_chunks
+)
+```
+
+**RAG is tenant-isolated in SQL, not in Python.** The organization filter is part of the
+`WHERE` clause, so a missing application-level check cannot leak another tenant's chunks:
+
+```python
+stmt = (
+    select(DocumentChunk)
+    .join(Document, DocumentChunk.document_id == Document.id)
+    .where(Document.organization_id == org_id)          # ← tenant boundary
+    .order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
+    .limit(limit)
+)
+```
 
 ---
 
-## 🛠️ Tech Stack
+## The RAG pipeline
 
-| Layer | Technology |
-|-------|------------|
-| **Framework** | [FastAPI](https://fastapi.tiangolo.com/) |
-| **Database** | PostgreSQL + [SQLAlchemy 2.0 (Async)](https://www.sqlalchemy.org/) + [asyncpg](https://github.com/MagicStack/asyncpg) |
-| **Migrations** | [Alembic](https://alembic.sqlalchemy.org/) |
-| **Validation** | Pydantic v2 / Pydantic-Settings |
-| **Auth** | JWT (python-jose), `pwdlib` (Argon2/bcrypt) |
-| **Caching / Broker** | Redis |
-| **Task Queue** | Celery |
-| **Object Storage** | MinIO (S3-compatible) via `aioboto3` + `minio` |
-| **Rate Limiting** | SlowAPI |
-| **Containerization** | Docker & Docker Compose |
-| **Server** | Uvicorn (+ uvloop/httptools) |
-| **Testing** | pytest |
-| **Linting** | ruff |
+### Ingestion — `POST /documents` triggers a Celery task
+
+```
+PDF uploaded
+   └─► process_document_task              (Celery, max_retries=3, 5s backoff)
+          ├─ minio.stat_object()          verify the object really exists
+          ├─ PdfReader().pages            extract text per page (pypdf)
+          ├─ chunk_text(500, overlap 50)   sliding window
+          ├─ SentenceTransformer           all-MiniLM-L6-v2 → 384-d vectors
+          └─ INSERT documentchunk         embedding column (pgvector)
+```
+
+Retries are bounded: on the final attempt the document is marked `failed` instead of
+retrying forever, and the error is re-raised so it is not silently swallowed.
+
+### Query — `POST /api/v1/rag/query`
+
+```
+question
+  ├─ embed the question              → 384-d vector
+  ├─ top-3 cosine neighbours         → filtered by organization_id
+  ├─ build a grounded prompt         → "answer only from this context"
+  └─ Gemini  models/gemini-3.6-flash → answer
+```
+
+`POST /api/v1/rag/query-stream` is identical but yields chunks as they arrive.
+
+**Resilience.** Gemini returns 503 under load, which would otherwise surface as a failed
+request. `_call_gemini_stream` wraps the call in `tenacity` with exponential backoff
+(3 attempts, 2–6s) and retries only on `ServerError`, so a genuine bad request is not
+retried three times. The streaming path degrades to an explanatory notice rather than a
+broken connection.
+
+**Model caching.** The embedding model is resolved by `EMBEDDING_MODEL_PATH` first and only
+falls back to the HuggingFace hub id when that directory is missing. Offline flags are
+applied **only** in the local case — see the debugging notes below.
 
 ---
 
-## 📁 Project Structure
+## Multi-tenancy & RBAC
+
+7 seeded roles over 11 permissions (51 role→permission links):
+
+| Role | Permissions | Intent |
+|---|---|---|
+| `Super Admin` | 11 | Platform-wide |
+| `Platform Admin` | 11 | Platform-wide |
+| `Organization Owner` | 11 | Owns the tenant, manages members and roles |
+| `Workspace Admin` | 8 | Manages documents and folders |
+| `Contributor` | 5 | Creates and edits content |
+| `Reviewer` | 3 | Reads and comments |
+| `Viewer` | 2 | Read-only |
+
+Enforcement is a dependency, so it is impossible to forget at a route:
+
+```python
+async def create_document(
+    _: bool = Depends(PermissionChecker("document:create")),
+    ...
+)
+```
+
+`PermissionChecker` **fails closed** — an unknown permission is a 403, never a pass. Seeding
+is idempotent, so it is safe to re-run on every deploy, and it reports loudly on a
+permission referenced by a role but missing from the catalogue instead of skipping it.
+
+---
+
+## Production debugging
+
+Four bugs found and fixed while deploying this to Azure. Each is a commit, and each has a
+regression test.
+
+**1. `pg_hba.conf` trusted every local connection.** The password was correct and still
+irrelevant — Postgres was configured with `trust` for loopback, so *any* password connected
+successfully. Found by testing that an old password still worked after rotating it. Fixed by
+switching to `scram-sha-256`, and both Postgres and Redis were rebound from `0.0.0.0` to
+`127.0.0.1`.
+
+**2. A failed model load poisoned the singleton forever.** `EmbeddingService` cached itself
+in `__new__` *before* the model had loaded. The first load failed, but the half-initialised
+instance stayed in `_instance`, so every later call reused the broken object instead of
+retrying. The visible error was always a HuggingFace connection error, which hid the fact
+that the API key was also missing. Fixed by memoising only after a successful load.
+
+**3. Offline mode was forced at import time.** `document_tasks.py` and
+`embedding_service.py` both set `HF_HUB_OFFLINE=1` on import, so the model could never be
+downloaded in the first place. Offline flags are now applied only when a local model
+directory actually exists.
+
+**4. The org creator was given the weakest role.** `register_new_organization` looked up
+`"Viewer"`, while the comment above it said "Get Admin role" and the error message said
+`'Member' does not exist`. Whoever created an organization ended up unable to manage
+members, documents or roles — unable to administer their own tenant. The test suite missed it
+because the assertions were `assert response.status_code in [200, 400, 404, 422, 500]`,
+which passes for almost any response. Fixed, and the test now asserts the exact role id;
+it was verified to fail against the old code.
+
+---
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| API framework | FastAPI 0.139, Starlette, Uvicorn (uvloop/httptools) |
+| Data | PostgreSQL 15 + **pgvector**, SQLAlchemy 2.0 async, asyncpg |
+| Migrations | Alembic (7 revisions) |
+| Validation | Pydantic v2, pydantic-settings |
+| Auth | JWT (PyJWT), Argon2 via `pwdlib`, FastAPI dependencies |
+| Vector search | pgvector cosine distance, `sentence-transformers` MiniLM (384-d) |
+| LLM | Google Gemini (`google-genai`) with `tenacity` backoff |
+| Background work | Celery + Redis, `pypdf` for extraction |
+| Object storage | MinIO (S3-compatible) via `minio` / `aioboto3` |
+| Rate limiting | SlowAPI |
+| Tests | pytest, pytest-asyncio, httpx |
+| Lint | ruff (lint + format) |
+
+---
+
+## Project structure
 
 ```
 docuflow-backend/
-├── docker/
-│   ├── fastapi.Dockerfile
-│   └── celery.Dockerfile
-├── docker-compose.yml          # postgres + redis + minio
-├── alembic.ini
-├── migrations/                 # Alembic versioned schema
+├── .github/workflows/ci.yml      # lint, tests, secret scan
+├── docker/                       # FastAPI & Celery Dockerfiles
+├── docker-compose.yml            # postgres+pgvector, redis, minio
+├── migrations/versions/          # 7 Alembic revisions
+├── requirements.txt              # runtime deps
+├── requirements-dev.txt          # test + lint tooling
+├── requirements-rag.txt          # optional ~2 GB PyTorch stack
+├── scripts/                      # manual dev utilities (need a live DB)
 ├── src/
-│   ├── main.py                 # App factory, lifespan, routers, rate limiter
-│   ├── core/
-│   │   ├── config.py           # Pydantic-settings (env-driven)
-│   │   ├── database.py         # Async engine + session factory
-│   │   ├── security.py         # JWT creation/decode + auth dependency
-│   │   ├── minio.py            # MinIO client singleton
-│   │   ├── limiter.py          # SlowAPI rate limiter
-│   │   ├── seeding.py          # Default role/permission seeding
-│   │   └── exceptions.py
-│   ├── api/v1/
-│   │   ├── auth.py             # /auth (register, login, refresh)
-│   │   ├── organizations.py    # /organizations
-│   │   ├── documents.py        # /documents, /folders
-│   │   ├── rbac.py             # /roles, /permissions, member roles
-│   │   ├── comment.py          # /comments
-│   │   ├── audit.py            # /audit
-│   │   ├── notification.py     # /notifications
-│   │   └── admin.py
-│   ├── models/                 # SQLAlchemy async models
-│   │   ├── auth.py             # User, RefreshToken
-│   │   ├── organization.py     # Organization, Membership
-│   │   ├── document.py         # Folder, Document, DocumentVersion
-│   │   ├── rbac.py             # Role, Permission, RolePermission
-│   │   ├── audit.py            # AuditLog (JSONB)
-│   │   ├── comment.py
-│   │   └── notification.py
-│   ├── repositories/           # Data-access layer
-│   ├── schemas/                # Pydantic request/response models
-│   ├── services/               # Business-logic layer (incl. storage.py)
-│   └── tasks/
-│       ├── celery_app.py       # Celery app (Redis broker/backend)
-│       ├── document_tasks.py   # process_document_task (PDF text extraction)
-│       ├── processing.py       # AI/OCR/embedding pipeline (planned)
-│       └── emails.py
-└── tests/                      # pytest (auth, comments, documents)
+│   ├── main.py                   # app, lifespan, routers, limiter
+│   ├── core/                     # config, database, security, seeding, limiter
+│   ├── api/v1/                   # 10 routers incl. rag.py
+│   ├── models/                   # SQLAlchemy models (chunks.py holds pgvector)
+│   ├── repositories/             # data access, one module per entity
+│   ├── schemas/                  # Pydantic request/response models
+│   ├── services/                 # business logic, RAG, embedding, storage
+│   ├── tasks/                    # Celery app + document pipeline
+│   └── utils/chunking.py         # sliding-window splitter
+└── tests/                        # pytest suite (mocked DB session)
 ```
 
 ---
 
-## 🚀 Getting Started
+## Setup
 
-### Prerequisites
-
-- Python 3.12+
-- Docker & Docker Compose (recommended for full stack) **or** a local PostgreSQL, Redis, and MinIO instance
-
-### 1. Clone the repository
+**Prerequisites:** Python 3.12+, Docker & Docker Compose.
 
 ```bash
 git clone https://github.com/MuhammadHaider1/docuflow-backend.git
 cd docuflow-backend
+
+python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -r requirements.txt -r requirements-dev.txt
+
+cp .env.example .env        # then edit: SECRET_KEY + GOOGLE_API_KEY
 ```
 
-### 2. Create a virtual environment & install dependencies
+Generate a real signing key:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+openssl rand -hex 32
 ```
 
-### 3. Configure environment variables
-
-Create a `.env` file in the project root:
-
-```env
-# Security
-SECRET_KEY=your-secret-key
-ALGORITHIM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-
-# Database (PostgreSQL)
-DB_USER=postgres
-DB_PASSWORD=password
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=docuflow
-
-# MinIO (S3-compatible object storage)
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET_NAME=docuflow-documents
-MINIO_SECURE=false
-```
-
-### 4. Start infrastructure with Docker Compose (PostgreSQL + Redis + MinIO)
+Start the infrastructure. Host ports match `.env.example`:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-> Exposed ports: PostgreSQL `5433`, Redis `6380`, MinIO `9000` (API) / `9001` (Console). Adjust `DB_HOST`, `DB_PORT`, etc. in `.env` accordingly.
+| Service | Host port | Notes |
+|---|---|---|
+| PostgreSQL + pgvector | `5432` | needs the `vector` extension — the image ships it |
+| Redis | `6380` | Celery broker |
+| MinIO API | `9100` | |
+| MinIO console | `9101` | <http://localhost:9101> |
 
-### 5. Run Alembic migrations
+Then initialise the database. **Use one of these, not both** — they create the same tables
+and running them together will conflict:
 
 ```bash
+# Option A — create the schema from the models and seed RBAC
+python init_db.py
+
+# Option B — or apply the 7 Alembic revisions instead
 alembic upgrade head
 ```
 
-### 6. Run the API server
+Start the API and the worker:
 
 ```bash
 uvicorn src.main:app --reload
-```
-
-The interactive API docs will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
-
-### 7. Run Celery worker (background document processing)
-
-```bash
 celery -A src.tasks.celery_app.app worker --loglevel=info
 ```
 
----
+API docs: <http://localhost:8000/docs>
 
-## 📡 API Endpoints (prefix `/api/v1`)
+### Enabling the RAG features
 
-| Module | Endpoints |
-|--------|-----------|
-| **Authentication** | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh` |
-| **Organizations** | `GET/POST /organizations`, `GET/POST/PATCH /organizations/{id}` |
-| **Documents & Folders** | CRUD + download `/documents`, `/folders` (nested tree) |
-| **RBAC** | `GET /roles`, `GET /permissions`, member role assign/revoke/get |
-| **Comments** | CRUD `/comments` |
-| **Audit Logs** | `GET /audit` (queryable audit trail) |
-| **Notifications** | CRUD + read/unread + bulk operations `/notifications` |
-| **Admin** | `/admin` |
-
----
-
-## 🧪 Running Tests
+The core API runs without them. To ingest vectors and answer questions:
 
 ```bash
-pytest
+pip install -r requirements-rag.txt
+```
+
+Set `GOOGLE_API_KEY` in `.env`. If you want the embedding model served from disk instead of
+downloaded on first use, place it at `EMBEDDING_MODEL_PATH` (default
+`models/all-MiniLM-L6-v2`) and the app will never contact HuggingFace.
+
+---
+
+## API surface
+
+All routes are prefixed `/api/v1`. Requests need `Authorization: Bearer <token>`, and
+tenant-scoped requests need an `X-Organization-Id` header.
+
+| Module | Endpoints |
+|---|---|
+| **Auth** | `POST /auth/register`, `/auth/login`, `/auth/refresh` |
+| **Organizations** | list / create / get / update / delete, add members |
+| **Documents & folders** | CRUD, nested folder tree, version history, download |
+| **RBAC** | `GET /roles`, `GET /permissions`, assign / revoke / read member role |
+| **RAG** | `POST /rag/query`, `POST /rag/query-stream` |
+| **Comments** | CRUD |
+| **Audit** | `GET /audit` |
+| **Notifications** | CRUD, read/unread, bulk mark-read |
+| **Admin** | `/admin` |
+
+```bash
+# ask a question about your documents
+curl -X POST http://localhost:8000/api/v1/rag/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Organization-Id: $ORG_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What database does this project use?"}'
 ```
 
 ---
 
-## ⚠️ Notes & Current State
+## Testing & CI
 
-- The `.env` file is **never committed** — it is git-ignored for security.
-- **Dockerfiles** (`docker/*.Dockerfile`) are stubs and part of the containerization roadmap.
-- **AI / RAG / OCR / vector embedding** features are designed into the architecture (see Roadmap) and are actively being implemented on top of the existing Celery + `extracted_content` pipeline.
+```bash
+pytest              # 20 tests
+ruff check src/ tests/ scripts/
+ruff format --check src/ tests/ scripts/
+```
+
+Tests run against a mocked async DB session, so **no PostgreSQL, Redis or MinIO is needed**
+to run the suite — which is what makes it usable in CI.
+
+GitHub Actions runs on every push and PR to `main`:
+
+- **Lint** — `ruff check` and `ruff format --check`
+- **Tests** — full suite on a clean environment
+- **Secret scan** — fails if a `.env` was ever committed, or if a Google API key /
+  HuggingFace token / private key appears in the tree
+
+That last job exists because this project has actually leaked a key once. It has been
+rotated, and the check is there to stop it happening again.
 
 ---
 
-## 🗺️ Roadmap
+## Security
 
-- [ ] **Vector Search RAG** — pgvector + LangChain semantic search & context-aware QA
-- [ ] **Background OCR** — automatic text extraction from scanned documents
-- [ ] **Vector Embedding Generation** — background async embedding via Celery
-- [ ] **LLM Summarization & Classification** — AI insights over extracted content
-- [ ] **Presigned URL download / uploads** on MinIO
-- [ ] **Full Dockerfile implementations** for FastAPI & Celery
-- [ ] **Multi-version document lineage UI**
+- `.env` is git-ignored and has never been committed; CI enforces this.
+- Passwords are hashed with Argon2. `SECRET_KEY`, the database password, the MinIO keys and
+  the Gemini key have all been rotated off their defaults.
+- Postgres and Redis bind to `127.0.0.1` only; only SSH and the API port are exposed.
+- RAG queries require `document:read` and are rate limited to 30/min.
+- Authorization is deny-by-default.
+
+> **Deployment note:** the Azure instance runs behind a private HTTPS tunnel rather than a
+> public port, and the API binds to loopback behind it. Postgres, Redis and MinIO are not
+> reachable from the internet.
 
 ---
 
-## 📄 License
+## Roadmap
 
-This project is open source. See the [LICENSE](LICENSE) file for details.
+- [ ] Replace the hard-coded Celery broker URL with a setting
+- [ ] Real integration tests against a live Postgres + pgvector instance
+- [ ] TLS via a real domain instead of the tunnel
+- [ ] OCR for scanned PDFs (`pypdf` only reads text layers)
+- [ ] Presigned upload/download URLs that work outside the host
+- [ ] Hybrid retrieval (BM25 + vector) and a re-ranker
+- [ ] Container images for the API and worker
+- [ ] Rate-limit and audit-log dashboards
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
