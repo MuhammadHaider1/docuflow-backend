@@ -9,9 +9,7 @@ from src.main import app
 
 @pytest.mark.asyncio
 async def test_document_comments_require_authentication(client: AsyncClient):
-    response = await client.get(
-        f"/api/v1/comments/documents/{uuid.uuid4()}/comments"
-    )
+    response = await client.get(f"/api/v1/comments/documents/{uuid.uuid4()}/comments")
     assert response.status_code == 401
     assert response.json()["detail"] == "Not authenticated"
 

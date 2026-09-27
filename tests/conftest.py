@@ -145,9 +145,7 @@ class FakeSession:
 
     @staticmethod
     def _entities(stmt: Any) -> list[str]:
-        return [
-            d.get("name") for d in getattr(stmt, "column_descriptions", []) or []
-        ]
+        return [d.get("name") for d in getattr(stmt, "column_descriptions", []) or []]
 
     async def execute(self, stmt: Any) -> FakeResult:
         # UPDATE ... RETURNING notification, as used by mark_as_read
@@ -205,9 +203,7 @@ class FakeSession:
             if not key.startswith(("id_", "user_id_"))
         }
 
-        target_id = next(
-            (v for k, v in bound.items() if k.startswith("id")), None
-        )
+        target_id = next((v for k, v in bound.items() if k.startswith("id")), None)
         target_user = next(
             (v for k, v in bound.items() if k.startswith("user_id")), None
         )
@@ -241,9 +237,15 @@ class FakeSession:
         now = datetime.now(timezone.utc)
         if getattr(instance, "id", None) is None:
             instance.id = uuid.uuid4()
-        if hasattr(instance, "created_at") and getattr(instance, "created_at", None) is None:
+        if (
+            hasattr(instance, "created_at")
+            and getattr(instance, "created_at", None) is None
+        ):
             instance.created_at = now
-        if hasattr(instance, "updated_at") and getattr(instance, "updated_at", None) is None:
+        if (
+            hasattr(instance, "updated_at")
+            and getattr(instance, "updated_at", None) is None
+        ):
             instance.updated_at = now
         if getattr(instance, "is_active", None) is None:
             instance.is_active = True
@@ -415,7 +417,5 @@ async def auth_client(db_session: FakeSession, org_id: uuid.UUID) -> AsyncClient
     wrapper's ``*args``/``**kwargs`` as required query parameters.
     """
     app.dependency_overrides[is_authenticated] = lambda: db_session.user
-    async with _client(
-        db_session, headers={"X-Organization-Id": str(org_id)}
-    ) as ac:
+    async with _client(db_session, headers={"X-Organization-Id": str(org_id)}) as ac:
         yield ac

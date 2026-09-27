@@ -43,7 +43,9 @@ async def test_document_search_rejects_invalid_sort_column(auth_client: AsyncCli
 
 @pytest.mark.asyncio
 async def test_document_search_rejects_page_size_over_limit(auth_client: AsyncClient):
-    response = await auth_client.get("/api/v1/documents/search", params={"page_size": 500})
+    response = await auth_client.get(
+        "/api/v1/documents/search", params={"page_size": 500}
+    )
     assert response.status_code == 422
 
 
@@ -108,7 +110,9 @@ async def test_delete_document_from_other_tenant_is_404(
 
 
 @pytest.mark.asyncio
-async def test_unknown_document_id_is_404(auth_client: AsyncClient, empty_db_session, install_session):
+async def test_unknown_document_id_is_404(
+    auth_client: AsyncClient, empty_db_session, install_session
+):
     install_session(empty_db_session)
     response = await auth_client.get(f"/api/v1/documents/{uuid.uuid4()}")
     assert response.status_code == 404

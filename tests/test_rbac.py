@@ -33,7 +33,9 @@ def member_factory(org_id):
     """Build a session for a member with an explicit role and permission set."""
 
     def _make(role_name: str, permissions: tuple[str, ...] = ()):
-        user = _make_user(f"{role_name.lower().replace(' ', '.')}@example.com", role_name, "x")
+        user = _make_user(
+            f"{role_name.lower().replace(' ', '.')}@example.com", role_name, "x"
+        )
         return FakeSession(
             user=user, org_id=org_id, role_name=role_name, permissions=permissions
         )
@@ -111,9 +113,7 @@ async def test_non_member_is_denied_entirely(org_id):
 async def test_editor_cannot_read_organization_audit_trail(member_factory):
     session = member_factory("Editor", ("document:create", "document:read"))
     async with await _client_for(session) as ac:
-        response = await ac.get(
-            "/api/v1/rbac/members/{}/role".format(uuid.uuid4())
-        )
+        response = await ac.get("/api/v1/rbac/members/{}/role".format(uuid.uuid4()))
     assert response.status_code == 403
     assert "organization:read" in response.json()["detail"]
 
@@ -124,7 +124,9 @@ async def test_assign_role_requires_org_header(member_factory):
     session = member_factory("Super Admin", ("members:manage_roles",))
     app.dependency_overrides[is_authenticated] = lambda: session.user
     app.dependency_overrides[get_db] = lambda: session
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
         response = await ac.post(
             "/api/v1/rbac/assign-role",
             json={"user_id": str(uuid.uuid4()), "role_id": str(session.role.id)},
