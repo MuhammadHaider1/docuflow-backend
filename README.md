@@ -397,18 +397,20 @@ rotated, and the check is there to stop it happening again.
   the 429 actually fires rather than trusting the decorator is present.
 - Authorization is deny-by-default.
 
-> **Deployment note:** the Azure instance publishes **no application port at all**. Uvicorn
-> binds to `127.0.0.1:8000` and is reached only through Tailscale Serve, which terminates a
-> real Let's Encrypt certificate:
+> **Deployment note — live demo:**
 >
 > ```
 > https://docuflow-api.tailc249f9.ts.net/docs
 > ```
 >
-> That is a private address — it resolves and answers only from devices on the tailnet, so
-> it will not load on a random machine. An external scan of the host shows **22 (SSH) as the
-> only open port**; Postgres, Redis, MinIO and the API's own port are all unreachable from
-> the internet.
+> Publicly reachable, behind a real Let's Encrypt certificate. Note what it is *not*: the VM
+> itself publishes **no application port**. Uvicorn binds to `127.0.0.1:8000` and the only
+> thing facing the internet is Tailscale's Funnel proxy on 443. An external scan of the host
+> shows **22 (SSH) as the only open port** — Postgres, Redis, MinIO and the API's own port are
+> unreachable, so Funnel exposure cannot be used to pivot at the data stores.
+>
+> Because the API is public, every route is rate limited (38/38): `login` and `register` at
+> 5/minute, so the endpoint cannot be used for offline password guessing.
 
 ---
 
@@ -417,8 +419,7 @@ rotated, and the check is there to stop it happening again.
 - [ ] Replace the hard-coded Celery broker URL with a setting
 - [ ] Real integration tests against a live Postgres + pgvector instance
 - [x] HTTPS in front of the API (Tailscale Serve, Let's Encrypt)
-- [ ] A public demo URL — Tailscale Serve is deliberately private, so a recruiter outside
-      the tailnet cannot open the docs link
+- [x] Public demo URL behind HTTPS
 - [ ] OCR for scanned PDFs (`pypdf` only reads text layers)
 - [ ] Presigned upload/download URLs that work outside the host
 - [ ] Hybrid retrieval (BM25 + vector) and a re-ranker
