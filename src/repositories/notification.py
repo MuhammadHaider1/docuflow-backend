@@ -29,7 +29,7 @@ class NotificationRepository:
         query = select(Notification).where(Notification.user_id == user_id)
 
         if unread_only:
-            query = query.where(Notification.is_read == False)
+            query = query.where(Notification.is_read.is_(False))
 
         query = (
             query.order_by(Notification.created_at.desc()).offset(offset).limit(limit)
@@ -53,7 +53,7 @@ class NotificationRepository:
     async def mark_all_as_read(self, user_id: uuid.UUID) -> int:
         query = (
             update(Notification)
-            .where(Notification.user_id == user_id, Notification.is_read == False)
+            .where(Notification.user_id == user_id, Notification.is_read.is_(False))
             .values(is_read=True)
         )
         result = await self.db.execute(query)

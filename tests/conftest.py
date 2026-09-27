@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.pool import NullPool
 
 from src.core.database import get_db
 from src.core.security import get_password_hash, is_authenticated

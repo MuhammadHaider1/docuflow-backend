@@ -57,7 +57,7 @@ class Settings(BaseSettings):
         if not all([db_user, db_host, db_name]):
             return "postgresql+asyncpg://postgres:postgres@localhost:5432/docuflow_db"
 
-        # Async connection string for宣SQLAlchemy (asyncpg)
+        # Async connection string for SQLAlchemy (asyncpg)
         return str(
             PostgresDsn.build(
                 scheme="postgresql+asyncpg",
